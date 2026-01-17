@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Voice-to-Text Desktop Tool for Mac
-Listens for Cmd+Shift+Space hotkey, records audio, transcribes with AWS Transcribe,
+Listens for Right Shift hotkey, records audio, transcribes with AWS Transcribe,
 and pastes the result at cursor position.
 """
 
@@ -19,7 +19,7 @@ import pyaudio
 import pyperclip
 import boto3
 from pynput import keyboard
-from pynput.keyboard import Key, Controller
+from pynput.keyboard import Key, Controller, KeyCode
 from amazon_transcribe.client import TranscribeStreamingClient
 from amazon_transcribe.handlers import TranscriptResultStreamHandler
 from amazon_transcribe.model import TranscriptEvent
@@ -67,12 +67,12 @@ class VoiceToText:
         # Keyboard controller for pasting
         self.kb_controller = Controller()
 
-        # Hotkey combination: Cmd+Shift+Space
+        # Hotkey combination: Right Shift key
         self.current_keys = set()
-        self.hotkey_combination = {Key.cmd, Key.shift, Key.space}
+        self.hotkey_combination = {Key.shift_r}
 
         print("Voice-to-Text Tool initialized (Streaming Mode)")
-        print("Press and hold Cmd+Shift+Space to record")
+        print("Press and hold Right Shift to record")
         print("Release to transcribe and paste")
         print("Press Ctrl+C to exit")
 
