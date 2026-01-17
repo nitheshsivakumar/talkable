@@ -1,3 +1,4 @@
+amazon-transcribe>=0.6.0
 boto3>=1.28.0
 pynput>=1.7.6
 pyaudio>=0.2.13

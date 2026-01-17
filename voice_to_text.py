@@ -12,13 +12,38 @@ import threading
 import tempfile
 import os
 import sys
+import asyncio
 from datetime import datetime
 
 import pyaudio
-import boto3
 import pyperclip
+import boto3
 from pynput import keyboard
 from pynput.keyboard import Key, Controller
+from amazon_transcribe.client import TranscribeStreamingClient
+from amazon_transcribe.handlers import TranscriptResultStreamHandler
+from amazon_transcribe.model import TranscriptEvent
+
+
+class TranscriptHandler(TranscriptResultStreamHandler):
+    """Custom handler for processing streaming transcription results"""
+
+    def __init__(self, stream, callback):
+        super().__init__(stream)
+        self.callback = callback
+        self.transcript = ""
+
+    async def handle_transcript_event(self, transcript_event: TranscriptEvent):
+        """Process incoming transcript events"""
+        results = transcript_event.transcript.results
+
+        for result in results:
+            if not result.is_partial:
+                # This is a final transcript
+                for alt in result.alternatives:
+                    self.transcript += alt.transcript + " "
+                    # Call callback with final transcript
+                    self.callback(self.transcript.strip())
 
 
 class VoiceToText:
@@ -35,12 +60,9 @@ class VoiceToText:
         self.audio = None
         self.stream = None
 
-        # AWS clients
-        self.s3_client = boto3.client('s3')
-        self.transcribe_client = boto3.client('transcribe')
-
-        # Get or create S3 bucket for temporary audio storage
-        self.bucket_name = self._get_or_create_bucket()
+        # Streaming transcription state
+        self.transcription_result = None
+        self.transcription_complete = threading.Event()
 
         # Keyboard controller for pasting
         self.kb_controller = Controller()
@@ -49,47 +71,10 @@ class VoiceToText:
         self.current_keys = set()
         self.hotkey_combination = {Key.cmd, Key.shift, Key.space}
 
-        print("Voice-to-Text Tool initialized")
+        print("Voice-to-Text Tool initialized (Streaming Mode)")
         print("Press and hold Cmd+Shift+Space to record")
         print("Release to transcribe and paste")
         print("Press Ctrl+C to exit")
-
-    def _get_or_create_bucket(self):
-        """Get or create an S3 bucket for temporary audio storage"""
-        bucket_name = f"voice-to-text-temp-{boto3.client('sts').get_caller_identity()['Account']}"
-
-        try:
-            # Check if bucket exists
-            self.s3_client.head_bucket(Bucket=bucket_name)
-            print(f"Using existing S3 bucket: {bucket_name}")
-        except:
-            # Create bucket if it doesn't exist
-            try:
-                print(f"Creating S3 bucket: {bucket_name}")
-                self.s3_client.create_bucket(
-                    Bucket=bucket_name,
-                    CreateBucketConfiguration={'LocationConstraint': boto3.session.Session().region_name}
-                    if boto3.session.Session().region_name != 'us-east-1' else {}
-                )
-
-                # Enable lifecycle policy to auto-delete objects after 1 day
-                self.s3_client.put_bucket_lifecycle_configuration(
-                    Bucket=bucket_name,
-                    LifecycleConfiguration={
-                        'Rules': [{
-                            'Id': 'DeleteAfter1Day',
-                            'Status': 'Enabled',
-                            'Prefix': '',
-                            'Expiration': {'Days': 1}
-                        }]
-                    }
-                )
-                print(f"Created S3 bucket with auto-delete policy: {bucket_name}")
-            except Exception as e:
-                print(f"Error creating bucket: {e}")
-                print("Transcription will still work, but files won't be auto-deleted")
-
-        return bucket_name
 
     def start_recording(self):
         """Start recording audio from microphone"""
@@ -149,107 +134,87 @@ class VoiceToText:
         threading.Thread(target=self._process_audio, daemon=True).start()
 
     def _process_audio(self):
-        """Process recorded audio: save to WAV, transcribe, paste text"""
+        """Process recorded audio using streaming transcription"""
         try:
             print("🔄 Processing audio...")
 
-            # Create WAV file in memory
-            wav_buffer = io.BytesIO()
-            wf = wave.open(wav_buffer, 'wb')
-            wf.setnchannels(self.CHANNELS)
-            wf.setsampwidth(pyaudio.PyAudio().get_sample_size(self.FORMAT))
-            wf.setframerate(self.RATE)
-            wf.writeframes(b''.join(self.frames))
-            wf.close()
+            # Reset transcription state
+            self.transcription_result = None
+            self.transcription_complete.clear()
 
-            # Get the WAV data
-            wav_data = wav_buffer.getvalue()
+            # Run async streaming transcription
+            asyncio.run(self._stream_audio())
 
-            # Transcribe the audio
-            transcribed_text = self._transcribe_audio(wav_data)
-
-            if transcribed_text:
-                # Paste the transcribed text
-                self._paste_text(transcribed_text)
-                print(f"✅ Transcribed and pasted: {transcribed_text}")
+            # Wait for transcription to complete (with timeout)
+            if self.transcription_complete.wait(timeout=10):
+                if self.transcription_result:
+                    # Paste the transcribed text
+                    self._paste_text(self.transcription_result)
+                    print(f"✅ Transcribed and pasted: {self.transcription_result}")
+                else:
+                    print("❌ No transcription result")
             else:
-                print("❌ No transcription result")
+                print("❌ Transcription timeout")
 
         except Exception as e:
             print(f"❌ Error processing audio: {e}")
 
-    def _transcribe_audio(self, wav_data):
-        """Upload audio to S3 and transcribe using AWS Transcribe"""
+    async def _stream_audio(self):
+        """Stream audio to AWS Transcribe using streaming API"""
         try:
-            # Generate unique job name
-            job_name = f"voice-to-text-{int(time.time() * 1000)}"
-            s3_key = f"{job_name}.wav"
+            print("🔤 Starting streaming transcription...")
 
-            # Upload to S3
-            print(f"☁️  Uploading audio to S3...")
-            self.s3_client.put_object(
-                Bucket=self.bucket_name,
-                Key=s3_key,
-                Body=wav_data
+            # Get AWS region from session
+            region = boto3.session.Session().region_name or "us-east-1"
+
+            # Create transcribe streaming client
+            client = TranscribeStreamingClient(region=region)
+
+            # Audio generator to yield chunks
+            async def audio_generator():
+                # Convert recorded frames to PCM audio stream
+                audio_data = b''.join(self.frames)
+                chunk_size = 1024 * 8  # 8KB chunks
+
+                for i in range(0, len(audio_data), chunk_size):
+                    chunk = audio_data[i:i + chunk_size]
+                    yield chunk
+                    await asyncio.sleep(0.01)  # Small delay between chunks
+
+            # Callback for handling transcript
+            def on_transcript(text):
+                self.transcription_result = text
+                self.transcription_complete.set()
+
+            # Start streaming transcription
+            stream = await client.start_stream_transcription(
+                language_code="en-US",
+                media_sample_rate_hz=self.RATE,
+                media_encoding="pcm",
             )
 
-            # Start transcription job
-            print("🔤 Starting transcription...")
-            file_uri = f"s3://{self.bucket_name}/{s3_key}"
+            # Create handler
+            handler = TranscriptHandler(stream.output_stream, on_transcript)
 
-            self.transcribe_client.start_transcription_job(
-                TranscriptionJobName=job_name,
-                Media={'MediaFileUri': file_uri},
-                MediaFormat='wav',
-                LanguageCode='en-US'
+            # Send audio and handle responses concurrently
+            await asyncio.gather(
+                self._write_audio_chunks(stream, audio_generator()),
+                handler.handle_events()
             )
 
-            # Wait for transcription to complete
-            while True:
-                status = self.transcribe_client.get_transcription_job(
-                    TranscriptionJobName=job_name
-                )
-                job_status = status['TranscriptionJob']['TranscriptionJobStatus']
-
-                if job_status == 'COMPLETED':
-                    # Get the transcription result
-                    transcript_uri = status['TranscriptionJob']['Transcript']['TranscriptFileUri']
-
-                    # Download and parse the transcript
-                    import json
-                    import urllib.request
-                    with urllib.request.urlopen(transcript_uri) as response:
-                        transcript_data = json.loads(response.read().decode())
-
-                    transcribed_text = transcript_data['results']['transcripts'][0]['transcript']
-
-                    # Clean up S3 and transcription job
-                    self._cleanup_aws_resources(job_name, s3_key)
-
-                    return transcribed_text
-
-                elif job_status == 'FAILED':
-                    print(f"❌ Transcription failed: {status['TranscriptionJob'].get('FailureReason', 'Unknown error')}")
-                    self._cleanup_aws_resources(job_name, s3_key)
-                    return None
-
-                # Wait a bit before checking again
-                time.sleep(0.5)
-
         except Exception as e:
-            print(f"❌ Transcription error: {e}")
-            return None
+            print(f"❌ Streaming transcription error: {e}")
+            self.transcription_complete.set()
 
-    def _cleanup_aws_resources(self, job_name, s3_key):
-        """Clean up S3 object and transcription job"""
+    async def _write_audio_chunks(self, stream, audio_generator):
+        """Write audio chunks to the stream"""
         try:
-            # Delete S3 object
-            self.s3_client.delete_object(Bucket=self.bucket_name, Key=s3_key)
-
-            # Delete transcription job
-            self.transcribe_client.delete_transcription_job(TranscriptionJobName=job_name)
+            async for chunk in audio_generator:
+                await stream.input_stream.send_audio_event(audio_chunk=chunk)
+            # Signal end of audio stream
+            await stream.input_stream.end_stream()
         except Exception as e:
-            print(f"⚠️  Warning: Error cleaning up AWS resources: {e}")
+            print(f"❌ Error writing audio chunks: {e}")
 
     def _paste_text(self, text):
         """Paste text at current cursor position"""

@@ -174,3 +174,53 @@ README.md mentions planned Version 2 features:
 - Menu bar app (requires macOS app framework, no terminal)
 - Custom hotkey configuration (modify hotkey_combination set)
 - Optional transcription history (requires data persistence layer)
+
+## Alternative Implementation: Local Whisper Model
+
+**Cost-saving alternative explored**: Replace AWS Transcribe with OpenAI Whisper (local, offline model)
+
+### Benefits of Whisper Implementation
+- **Cost**: Completely free (no AWS charges)
+- **Speed**: 1-3 seconds processing (vs current 8-10 seconds with AWS batch)
+- **Privacy**: Audio never leaves the computer
+- **Offline**: Works without internet connection
+- **Accuracy**: Comparable to AWS Transcribe
+
+### Implementation Approach
+1. Replace `boto3` dependency with `openai-whisper` package
+2. Remove all AWS-related code (S3 upload, Transcribe job management, bucket creation)
+3. Replace `_transcribe_audio()` method to use local Whisper model
+4. Process audio directly from in-memory WAV buffer (no S3 upload needed)
+5. Use Whisper with Metal acceleration on Apple Silicon for <1 second processing
+
+### Model Size Options
+- `tiny`: ~40MB, fastest, less accurate
+- `base`: ~75MB, good balance
+- `small`: ~150MB, better accuracy (recommended)
+- `medium`: ~1.5GB, very accurate
+- `large`: ~3GB, best accuracy
+
+### Code Changes Required
+```python
+# Replace boto3 with whisper
+import whisper
+
+# In __init__:
+self.model = whisper.load_model("small")  # One-time model load
+
+# Replace _transcribe_audio() method:
+def _transcribe_audio(self, wav_data):
+    # Write to temp file for Whisper
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
+        temp_audio.write(wav_data)
+        temp_path = temp_audio.name
+
+    result = self.model.transcribe(temp_path)
+    os.unlink(temp_path)
+    return result["text"]
+```
+
+### Tradeoffs
+- **One-time download**: Model files (150MB-3GB depending on size)
+- **CPU/GPU usage**: Uses local compute instead of cloud
+- **No AWS infrastructure**: Eliminates S3 bucket, IAM permissions, etc.
