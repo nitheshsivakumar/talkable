@@ -1,0 +1,124 @@
+PROMPT FOR CLAUDE CODE ON WINDOWS LAPTOP
+==========================================
+
+Copy and paste this entire prompt into Claude Code on your Windows machine:
+
+---
+
+I want to create a voice-to-text tool for Windows that uses AWS Transcribe Streaming API for transcription.
+
+REQUIREMENTS:
+- Press and hold Right Shift key to record audio
+- Release to stop recording and transcribe
+- Automatically paste transcribed text at cursor position using Ctrl+V (Windows paste)
+- Use AWS Transcribe Streaming API (real-time transcription)
+- Run from terminal/command prompt (no auto-start, no system tray icon)
+- Simple and straightforward
+
+TECHNICAL DETAILS:
+- Use pynput for keyboard hotkey detection (Right Shift key)
+- Use pyaudio for audio recording (16kHz, mono, 16-bit PCM)
+- Use amazon-transcribe SDK for streaming transcription
+- Use pyperclip + pynput to paste via Ctrl+V simulation on Windows (NOT Cmd+V)
+- Print log messages to console/terminal
+- Handle async operations with asyncio
+
+PLATFORM-SPECIFIC CHANGES FOR WINDOWS:
+- Paste key: Use Key.ctrl instead of Key.cmd for Ctrl+V paste operation
+- File paths: Use Windows-style paths (backslashes handled by Python automatically)
+- Virtual environment activation: Use venv\Scripts\activate.bat (not source venv/bin/activate)
+
+PROJECT STRUCTURE:
+1. voice_to_text.py - Single main script
+   - TranscriptHandler class for handling streaming transcript events
+   - VoiceToText class with:
+     - Keyboard listener for Right Shift hotkey
+     - Audio recording with PyAudio
+     - AWS Transcribe streaming transcription
+     - Paste via clipboard + Ctrl+V (Windows)
+     - Signal handlers for graceful shutdown (Ctrl+C)
+
+2. Setup scripts
+   - setup.bat - Install PortAudio dependencies, create venv, install Python packages
+   - run.bat - Activate venv and run voice_to_text.py
+   - requirements.txt with dependencies:
+     - amazon-transcribe>=0.6.0
+     - boto3>=1.28.0
+     - pynput>=1.7.6
+     - pyaudio>=0.2.13
+     - pyperclip>=1.8.2
+
+3. README.md - Documentation for Windows setup and usage
+
+CRITICAL IMPLEMENTATION DETAILS:
+
+1. Paste operation MUST use Ctrl key (Windows), not Cmd key (Mac):
+   ```python
+   def _paste_text(self, text):
+       try:
+           pyperclip.copy(text)
+           time.sleep(0.1)
+           # Use Ctrl on Windows (NOT Key.cmd)
+           with self.kb_controller.pressed(Key.ctrl):
+               self.kb_controller.press('v')
+               self.kb_controller.release('v')
+       except Exception as e:
+           print(f"Error pasting text: {e}")
+   ```
+
+2. Use AWS Transcribe Streaming API (same as Mac version):
+   - TranscribeStreamingClient for real-time transcription
+   - Stream audio chunks asynchronously
+   - Handle transcript events with custom handler
+   - Language: en-US
+
+3. Audio recording settings:
+   - Sample rate: 16000 Hz
+   - Channels: 1 (mono)
+   - Format: 16-bit PCM (pyaudio.paInt16)
+   - Chunk size: 1024
+
+4. Hotkey: Right Shift key (same as Mac version)
+
+5. AWS credentials: Load from standard Windows AWS config location
+   - %USERPROFILE%\.aws\credentials
+   - %USERPROFILE%\.aws\config
+
+SETUP.BAT SHOULD INCLUDE:
+- Check if Python is installed
+- Create virtual environment: python -m venv venv
+- Activate venv: call venv\Scripts\activate.bat
+- Upgrade pip: python -m pip install --upgrade pip
+- Install PyAudio (may require manual install on Windows)
+- Install other dependencies: pip install -r requirements.txt
+- Check AWS credentials: aws sts get-caller-identity
+- Display usage instructions
+
+RUN.BAT SHOULD INCLUDE:
+- Activate virtual environment: call venv\Scripts\activate.bat
+- Run Python script: python voice_to_text.py
+- Handle errors gracefully
+
+IMPORTANT:
+- Use print() for console output (no logging to files)
+- Use Key.ctrl for paste operation (Windows uses Ctrl+V, not Cmd+V)
+- Handle Windows-specific PyAudio installation issues in README
+- AWS region should be configurable via AWS CLI or environment variable
+- Works with internet connection (AWS Transcribe is cloud-based)
+- Real-time streaming transcription (1-3 second latency)
+
+PYAUDIO INSTALLATION NOTES FOR README:
+On Windows, PyAudio installation can be tricky. Include these alternatives:
+1. Try: pip install pyaudio
+2. If fails, download precompiled wheel from: https://www.lfd.uci.edu/~gohlke/pythonlibs/#pyaudio
+3. Or use: pip install pipwin && pipwin install pyaudio
+
+Please create this Windows version with:
+- voice_to_text.py (using Key.ctrl for paste)
+- setup.bat (Windows batch script)
+- run.bat (Windows batch script)
+- requirements.txt
+- README.md (with Windows-specific instructions)
+- .gitignore
+
+Make sure the paste operation uses Ctrl+V (Key.ctrl), not Cmd+V!
